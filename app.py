@@ -1,96 +1,118 @@
 import cv2
-import torch
 import tkinter as tk
-from tkinter import simpledialog
-from torchvision.transforms import ToTensor
+from tkinter import messagebox
+from functions.app_design import app_theme, style_button, style_label, style_listbox, COLORS
+from functions.camera_utils import get_available_cameras
+from functions.emotion_engine import EmotionEngine
 
-from functions.app_design import app_theme
-from functions.model_emotion_classifier import EmotionClassifier
+class FaceAffectusApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Face Affectus")
+        self.root.withdraw() # Hide root until selection is made
+        app_theme(self.root)
+        
+        self.engine = EmotionEngine()
+        self.selected_camera_id = None
+        
+        # Start camera selection
+        self.create_selection_window()
 
+    def create_selection_window(self):
+        selection_window = tk.Toplevel(self.root)
+        selection_window.title("Face Affectus - Select Camera")
+        selection_window.geometry("480x400")
+        selection_window.configure(bg=COLORS['primary'])
+        
+        # Title
+        title_label = tk.Label(selection_window, text="Welcome to Face Affectus")
+        style_label(title_label, variant='title')
+        title_label.pack(pady=(30, 10))
+        
+        subtitle_label = tk.Label(selection_window, text="Please select your active camera device")
+        style_label(subtitle_label)
+        subtitle_label.pack(pady=(0, 20))
 
-# Create a tkinter root window
-root = tk.Tk()
-root.withdraw()
-app_theme(root)
+        # Camera List
+        list_frame = tk.Frame(selection_window, bg=COLORS['primary'])
+        list_frame.pack(padx=40, pady=10, fill='both', expand=True)
+        
+        self.listbox = tk.Listbox(list_frame)
+        style_listbox(self.listbox)
+        self.listbox.pack(side='left', fill='both', expand=True)
+        
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        # Style scrollbar via primary color (limited in basic tkinter, but okay)
+        scrollbar.pack(side='right', fill='y')
+        self.listbox.config(yscrollcommand=scrollbar.set)
 
-# Ask the user for the camera number
-camera_number = None
-while camera_number is None:
-    dialogue = simpledialog.askstring("Input", "Please enter your camera number (if you only have 1, then it's 0 because indexing starts from 0)", parent=root)
-    if dialogue.isdigit():
-        camera_number = int(dialogue)
+        self.refresh_camera_list()
 
-# Create a dictionary to map class numbers to emotion names
-class_to_emotion = {0: 'angry', 1: 'disgust', 2: 'fear', 3: 'happy', 4: 'neutral', 5: 'sad', 6: 'surprise'}
+        # Buttons
+        btn_frame = tk.Frame(selection_window, bg=COLORS['primary'])
+        btn_frame.pack(pady=30)
 
-# Create an instance of the model & Move model to GPU if available
-model = EmotionClassifier()
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+        select_btn = tk.Button(btn_frame, text="LAUNCH APPLICATION", command=lambda: self.on_select(selection_window))
+        style_button(select_btn)
+        select_btn.pack(side='left', padx=10)
 
-# Load model weights & # Make sure the model is in evaluation mode
-model.load_state_dict(torch.load('weights/best_emotion_classifier.pth'))
-model.eval()
+        refresh_btn = tk.Button(btn_frame, text="Refresh Devices", command=self.refresh_camera_list, bg=COLORS['secondary'])
+        style_button(refresh_btn)
+        refresh_btn.configure(bg=COLORS['secondary']) # Overwrite default accent for refresh
+        refresh_btn.pack(side='left', padx=10)
 
-# Load cascading classifier for face detection
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        selection_window.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        selection_window.grab_set()
 
-# Open camera
-cap = cv2.VideoCapture(camera_number)
+    def refresh_camera_list(self):
+        self.listbox.delete(0, tk.END)
+        self.cameras = get_available_cameras()
+        if not self.cameras:
+            self.listbox.insert(tk.END, "No cameras detected!")
+        else:
+            for cam in self.cameras:
+                self.listbox.insert(tk.END, f"  {cam['name']}")
+            self.listbox.select_set(0)
 
-while True:
-    ret, frame = cap.read() # Read image from camera
-    if not ret:
-        break
+    def on_select(self, window):
+        selection = self.listbox.curselection()
+        if not selection or not self.cameras:
+            messagebox.showwarning("Warning", "Please select a valid camera device.")
+            return
+            
+        self.selected_camera_id = self.cameras[selection[0]]['id']
+        window.destroy()
+        self.run_engine()
 
-    # Convert image to grayscale
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    def run_engine(self):
+        cap = cv2.VideoCapture(self.selected_camera_id)
+        if not cap.isOpened():
+            messagebox.showerror("Error", "Could not open selected camera.")
+            self.root.destroy()
+            return
 
-    # Detect faces in image
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        print(f"Starting Face Affectus with camera {self.selected_camera_id}")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-    # If no face is detected, show the image and continue the loop
-    if len(faces) == 0:
-        cv2.imshow('Emotion Detection (space to exit)', frame)
-        if cv2.waitKey(1) & 0xFF == ord(' '):
-            break
-        continue
+            # Process frame using the modular engine
+            processed_frame, _ = self.engine.process_frame(frame)
 
-    # Otherwise, select the largest face
-    face = max(faces, key=lambda rectangle: rectangle[2] * rectangle[3])
+            # Show image
+            cv2.imshow('Face Affectus (space to exit)', processed_frame)
 
-    # Extract face coordinates
-    x, y, w, h = face
+            # If user presses 'space', exit loop
+            if cv2.waitKey(1) & 0xFF == ord(' '):
+                break
 
-    # Extract face from image & convert to tensor
-    face = gray[y:y+h, x:x+w]
-    face = cv2.resize(face, (48, 48))
-    image = ToTensor()(face).unsqueeze(0)
+        cap.release()
+        cv2.destroyAllWindows()
+        self.root.destroy()
 
-    # If you are using a GPU, move the image to the GPU
-    image = image.to(device)
-
-    # Make a prediction
-    with torch.no_grad():
-        output = model(image)
-        predicted_class = torch.argmax(output, dim=1)
-
-    # Get the name of the predicted emotion
-    predicted_emotion = class_to_emotion[predicted_class.item()]
-
-    # Draw a rectangle around the face
-    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-
-    # Show predicted emotion above rectangle
-    cv2.putText(frame, predicted_emotion, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-    # Show image
-    cv2.imshow('Emotion Detection (space to exit)', frame)
-
-    # If user presses 'space', exit loop
-    if cv2.waitKey(1) & 0xFF == ord(' '):
-        break
-
-# Free the camera and destroy all windows
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FaceAffectusApp(root)
+    root.mainloop()
