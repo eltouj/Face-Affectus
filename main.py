@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import List
 from pydantic import BaseModel
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from functions.emotion_engine import EmotionEngine
 
@@ -21,6 +21,47 @@ app.add_middleware(
 
 # Initialize the modular emotion engine
 engine = EmotionEngine()
+
+# Signaling Manager for WebRTC
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, room_id: str):
+        await websocket.accept()
+        if room_id not in self.active_connections:
+            self.active_connections[room_id] = []
+        self.active_connections[room_id].append(websocket)
+        print(f"Client connected to room: {room_id}. Total in room: {len(self.active_connections[room_id])}")
+
+    def disconnect(self, websocket: WebSocket, room_id: str):
+        if room_id in self.active_connections:
+            self.active_connections[room_id].remove(websocket)
+            if not self.active_connections[room_id]:
+                del self.active_connections[room_id]
+        print(f"Client disconnected from room: {room_id}")
+
+    async def broadcast(self, message: str, room_id: str, sender: WebSocket):
+        if room_id in self.active_connections:
+            for connection in self.active_connections[room_id]:
+                if connection != sender:
+                    await connection.send_text(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws/{room_id}/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, room_id: str, client_id: str):
+    await manager.connect(websocket, room_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Relay signaling message to other peer in the same room
+            await manager.broadcast(data, room_id, websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, room_id)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        manager.disconnect(websocket, room_id)
 
 @app.get("/")
 async def root():

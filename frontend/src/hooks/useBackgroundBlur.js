@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 
 // Using window.SelfieSegmentation loaded via CDN in index.html to avoid Vite bundler issues
 const SelfieSegmentation = window.SelfieSegmentation;
@@ -31,10 +31,17 @@ export const useBackgroundBlur = (videoElement, canvasElement, isEnabled) => {
     });
 
     selfieSegmentation.onResults((results) => {
-      if (!canvasElement || !videoElement) return;
+      if (!canvasElement || !videoElement || !results.image) return;
+      if (videoElement.readyState < 2 || videoElement.videoWidth === 0) return;
 
       const canvasCtx = canvasElement.getContext('2d');
       const { width, height } = canvasElement;
+
+      // Ensure canvas matches video aspect ratio/size if needed
+      if (width !== videoElement.videoWidth || height !== videoElement.videoHeight) {
+          // You might want to sync them here, but let's just check for non-zero
+          if (videoElement.videoWidth === 0) return;
+      }
 
       canvasCtx.save();
       canvasCtx.clearRect(0, 0, width, height);
@@ -62,18 +69,32 @@ export const useBackgroundBlur = (videoElement, canvasElement, isEnabled) => {
     });
 
     selfieSegmentationRef.current = selfieSegmentation;
+    selfieSegmentationRef.current.isClosing = false;
     setIsLoaded(true);
 
     return () => {
-      selfieSegmentation.close();
+      if (selfieSegmentationRef.current) {
+        selfieSegmentationRef.current.isClosing = true;
+        selfieSegmentationRef.current.close();
+        selfieSegmentationRef.current = null;
+      }
+      setIsLoaded(false);
     };
   }, [canvasElement, videoElement, isEnabled]);
 
-  const processFrame = async () => {
-    if (selfieSegmentationRef.current && videoElement && videoElement.readyState >= 2) {
-      await selfieSegmentationRef.current.send({ image: videoElement });
+  const processFrame = useCallback(async () => {
+    if (selfieSegmentationRef.current && 
+        !selfieSegmentationRef.current.isClosing &&
+        videoElement && 
+        videoElement.readyState >= 2 && 
+        videoElement.videoWidth > 0) {
+      try {
+        await selfieSegmentationRef.current.send({ image: videoElement });
+      } catch (err) {
+        console.error("[MediaPipe] Error processing frame:", err);
+      }
     }
-  };
+  }, [videoElement]);
 
   return { isLoaded, processFrame };
 };
