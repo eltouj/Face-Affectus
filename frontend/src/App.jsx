@@ -226,7 +226,7 @@ const App = () => {
       
       requestRef = requestAnimationFrame(animate);
     };
-    if ((selectedDevice && isCamEnabled) || (role === 'hr' && remoteStream)) {
+    if (hasJoined || (selectedDevice && isCamEnabled) || (role === 'hr' && remoteStream)) {
       requestRef = requestAnimationFrame(animate);
     }
     return () => cancelAnimationFrame(requestRef);
@@ -247,19 +247,20 @@ const App = () => {
         .catch(err => console.error("[Audio] Failed to set output device:", err));
     }
   }, [selectedSpeaker]);
-
   // WebRTC Signaling & Initialization
   useEffect(() => {
-    // Only initialize if we've joined AND the stream is ready
-    // Safe guard: if HR has camera off, they still need to wait for signaling to start
-    const canInitialize = hasJoined && (isStreamReady || !isCamEnabled);
+    if (!hasJoined) return;
     
-    if (!canInitialize) return;
-    
-    console.log(`[WebRTC Effect] Initializing... (Role: ${role}, StreamReady: ${isStreamReady}, CamEnabled: ${isCamEnabled})`);
+    console.log(`[WebRTC] Initializing for room: ${roomID} as ${role}`);
     const cleanup = () => {
-      if (socketRef.current) socketRef.current.close();
-      if (pcRef.current) pcRef.current.close();
+      if (socketRef.current) {
+        console.log("[WebRTC] Closing socket");
+        socketRef.current.close();
+      }
+      if (pcRef.current) {
+        console.log("[WebRTC] Closing PeerConnection");
+        pcRef.current.close();
+      }
     };
 
     const initWebRTC = async () => {
@@ -342,11 +343,14 @@ const App = () => {
                 pendingCandidates.current.push(data.candidate);
               }
             }
-          } else if (data.type === 'join' && role === 'hr') {
-            console.log("[Signaling] Candidate joined, preparing offer...");
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socketRef.current.send(JSON.stringify({ type: 'offer', offer }));
+          } else if (data.type === 'join') {
+            // If anyone joins and we are HR, we initiate an offer
+            if (role === 'hr') {
+              console.log("[Signaling] Another peer joined, preparing offer...");
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              socketRef.current.send(JSON.stringify({ type: 'offer', offer }));
+            }
           }
         } catch (err) {
           console.error("[Signaling] Error processing message:", err);
@@ -357,10 +361,21 @@ const App = () => {
         console.log(`[WebRTC] ICE Connection State: ${pc.iceConnectionState}`);
       };
 
-      socketRef.current.onopen = () => {
+      socketRef.current.onopen = async () => {
         console.log("Connected to signaling server in room:", roomID);
-        if (role === 'candidate') {
-          socketRef.current.send(JSON.stringify({ type: 'join' }));
+        // Both roles notify their presence
+        socketRef.current.send(JSON.stringify({ type: 'join' }));
+        
+        // Optimistic: if we are HR, try an offer immediately in case someone is already there
+        if (role === 'hr') {
+          console.log("[Signaling] HR joined, trying optimistic offer...");
+          try {
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socketRef.current.send(JSON.stringify({ type: 'offer', offer }));
+          } catch (e) {
+            console.warn("[Signaling] Optimistic offer failed (likely no tracks yet):", e);
+          }
         }
       };
 
@@ -369,7 +384,7 @@ const App = () => {
 
     initWebRTC();
     return cleanup;
-  }, [hasJoined, roomID, role, selectedDevice, localStream]);
+  }, [hasJoined, roomID, role, selectedDevice]); 
   
   // Assign remote stream to video element whenever it changes
   useEffect(() => {
@@ -926,53 +941,64 @@ const App = () => {
                   <span>You are sharing your screen</span>
                 </div>
               </>
-            ) : isCamEnabled ? (
+            ) : (
+              /* Camera View Area */
               <div className="video-wrapper" style={{ width: '100%', height: '100%' }}>
-                <Webcam
-                  key={selectedDevice}
-                  audio={false}
-                  ref={webcamRef}
-                   onUserMedia={(stream) => {
-                     setLocalStream(stream);
-                     console.log("[Webcam] Media stream ready");
-                     setIsStreamReady(true);
-                   }}
-                  onUserMediaError={(err) => console.error("[Webcam] Error:", err)}
-                  screenshotFormat="image/jpeg"
-                  videoConstraints={{ deviceId: { exact: selectedDevice }, width: 1280, height: 720 }}
-                  style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }}
-                />
+                {isCamEnabled && (
+                  <Webcam
+                    key={selectedDevice}
+                    audio={false}
+                    ref={webcamRef}
+                    onUserMedia={(stream) => {
+                      setLocalStream(stream);
+                      console.log("[Webcam] Media stream ready");
+                      setIsStreamReady(true);
+                    }}
+                    onUserMediaError={(err) => {
+                      console.error("[Webcam] Error:", err);
+                    }}
+                    screenshotFormat="image/jpeg"
+                    videoConstraints={{ deviceId: selectedDevice ? { exact: selectedDevice } : undefined, width: 1280, height: 720 }}
+                    style={{ position: 'absolute', opacity: 0, pointerEvents: 'none' }}
+                  />
+                )}
                 
-                {/* Main View Area: Either remote video OR local canvas (if no remote) */}
                 {remoteStream ? (
                   <video
                     ref={remoteVideoRef}
                     autoPlay
                     playsInline
                     className="webcam-feed"
-                    style={{ 
-                      width: '100%', 
-                      height: '100%', 
-                      objectFit: 'cover'
-                    }}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                 ) : (
-                  <canvas 
-                    ref={localCanvasRef} 
-                    width={1280} 
-                    height={720} 
-                    className={`webcam-feed ${role !== 'hr' ? 'mirrored-video' : ''}`}
-                    style={{ 
-                      width: '100%', 
-                      height: '100%', 
-                      objectFit: 'cover'
-                    }} 
-                  />
+                  /* While alone, both see a waiting message, but can see themselves in PIP */
+                  <div className="waiting-placeholder-container">
+                    <div className="waiting-avatar-pulse">
+                      <Users size={48} />
+                    </div>
+                    <div className="waiting-text-title">
+                      {role === 'hr' ? 'En attente du candidat...' : "En attente de l'hôte..."}
+                    </div>
+                    <div className="waiting-text-subtitle">
+                      {role === 'hr' 
+                        ? "La session commencera dès que le candidat rejoindra l'appel."
+                        : "L'entretien commencera dès que le recruteur sera prêt."}
+                    </div>
+                    {!isCamEnabled && (
+                      <div style={{ marginTop: '20px', color: '#ea4335', fontSize: '14px', fontWeight: '500' }}>
+                        <VideoOff size={16} style={{ verticalAlign: 'middle', marginRight: '8px' }} />
+                        Votre caméra est désactivée
+                      </div>
+                    )}
+                  </div>
                 )}
                 
                 <div className="candidate-name">
-                  <span>{remoteStream ? (role === 'hr' ? 'Candidat' : 'Recruteur') : (role === 'hr' ? 'Candidat (En attente...)' : 'Recruteur (En attente...)')}</span>
+                  <span>{remoteStream ? (role === 'hr' ? 'Candidat' : 'Recruteur') : (role === 'hr' ? 'Candidat (En attente...)' : 'Vous')}</span>
                 </div>
+
+                {/* Recruiter Only Overlays */}
                 {role === 'hr' && results.length > 0 && isAnalyzing && (
                   <div className="emotion-badge">
                     {results[0].emotion}
@@ -994,16 +1020,11 @@ const App = () => {
                     gap: '6px',
                     zIndex: 20
                   }}>
-                    <div style={{ width: '8px', height: '8px', background: 'white', borderRadius: '50%', animation: 'pulse 1s infinite' }} />
+                    <div style={{ width: '8px', height: '8px', background: 'white', borderRadius: '50%', animation: 'pulse 1s infinite' }}></div>
                     REC
                   </div>
                 )}
               </div>
-            ) : (
-              <>
-                <div className="peer-avatar">Candidate</div>
-                <div className="candidate-name"><span>Candidate</span></div>
-              </>
             )}
           </div>
 

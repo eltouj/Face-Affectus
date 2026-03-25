@@ -5,8 +5,8 @@ echo    HumatiQ: Starting Backend ^& Frontend
 echo ==========================================
 
 :: Start Backend
-echo [1/2] Launching FastApi (uvicorn)...
-start "HumatiQ Backend" cmd /k "uvicorn main:app --reload"
+echo [1/2] Launching FastApi (uvicorn) with VENV...
+start "HumatiQ Backend" cmd /k "cd .env\Scripts && call activate.bat && cd ../.. && uvicorn main:app --reload"
 
 :: Start Frontend
 echo [2/2] Launching Vite Frontend...
